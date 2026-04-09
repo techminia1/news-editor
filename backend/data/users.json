@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ec8a7ef1-3175-4d41-9212-90ee2113268b",
+    "username": "admin",
+    "displayName": "Administrator",
+    "role": "admin",
+    "passwordHash": "d9bcde0861bf7fc87eb3c4e6b1aa82ca:0efe52751c5877294a18cbc2cdbd0c190535a908e2c1a1ca09b1024f60327985f058e0bcb01f3879a1f1776597344eb7b74bfe86a3b83f12d41cd5eb9bdf1f08",
+    "logoFileName": null,
+    "createdAt": "2026-04-08T05:32:10.979Z"
+  },
+  {
+    "id": "3e704d8b-d7c0-481f-ac41-76871a1ebac8",
+    "username": "harshit",
+    "displayName": "anil maorya",
+    "role": "user",
+    "passwordHash": "51be0831fbc041784a25254708f44a31:41cb061089eb2cde97dce202bbe0f75dd24e8a1989d02b1875fbddc3f24d65da17d7d80f684c42b315f814cf3b09b5aee1c8f3e7782a62c376e1234641346edd",
+    "logoFileName": "758415db-cfeb-4275-b0a3-4a5b25c0dde6.png",
+    "createdAt": "2026-04-08T05:34:49.530Z"
+  }
+]
