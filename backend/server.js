@@ -472,7 +472,9 @@ async function uploadFileToCloudinary(filePath, options) {
   });
 }
 
-async function storeUploadedMedia(file, kind, resourceType, folder) {
+async function storeUploadedMedia(file, kind, resourceType, folder, options = {}) {
+  const { removeLocalFile = true } = options;
+
   if (!file) {
     return null;
   }
@@ -497,7 +499,9 @@ async function storeUploadedMedia(file, kind, resourceType, folder) {
         bytes: result.bytes || null,
       };
     } finally {
-      await fs.remove(file.path).catch(() => {});
+      if (removeLocalFile) {
+        await fs.remove(file.path).catch(() => {});
+      }
     }
   }
 
@@ -1333,18 +1337,24 @@ app.post('/api/upload', authMiddleware, videoUpload.single('video'), async (req,
       return;
     }
 
-    const metadata = await getVideoMetadata(req.file.path);
+    const metadataPromise = getVideoMetadata(req.file.path);
+    const remoteUploadPromise = ensureRemoteStorageConfigured()
+      ? storeUploadedMedia(
+          req.file,
+          'upload',
+          'video',
+          `newsoverlay-pro/users/${req.user.id}/uploads`,
+          { removeLocalFile: false }
+        )
+      : Promise.resolve(null);
+
+    const metadata = await metadataPromise;
     const orientation = metadata.width > metadata.height ? 'landscape' : 'portrait';
     let fileToken = req.file.filename;
     let videoUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
 
     if (ensureRemoteStorageConfigured()) {
-      const media = await storeUploadedMedia(
-        req.file,
-        'upload',
-        'video',
-        `newsoverlay-pro/users/${req.user.id}/uploads`
-      );
+      const media = await remoteUploadPromise;
       const record = {
         id: uuidv4(),
         ownerUserId: req.user.id,
@@ -1355,6 +1365,7 @@ app.post('/api/upload', authMiddleware, videoUpload.single('video'), async (req,
       await insertUploadRecord(record);
       fileToken = record.id;
       videoUrl = media.secureUrl;
+      await fs.remove(req.file.path).catch(() => {});
     }
 
     res.json({
