@@ -160,8 +160,10 @@ VITE_API_BASE_URL=https://your-backend-domain.com
 CORS_ORIGIN=https://your-project.vercel.app
 ```
 
-6. Deploy the backend.
-7. Copy the deployed backend URL and paste it into the frontend Vercel variable:
+6. Add a strong `SESSION_SECRET` value in production.
+7. Optional but recommended: set `DATA_ROOT` to a persistent mounted path if your host supports persistent disks.
+8. Deploy the backend.
+9. Copy the deployed backend URL and paste it into the frontend Vercel variable:
 
 ```env
 VITE_API_BASE_URL=https://your-backend-domain.com
@@ -232,7 +234,10 @@ Create `backend/.env`:
 PORT=5000
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123
+SESSION_SECRET=replace-with-a-long-random-secret
+SESSION_TTL_HOURS=168
 CORS_ORIGIN=http://localhost:5173,https://your-frontend-domain.vercel.app
+DATA_ROOT=./
 ```
 
 ## Troubleshooting

@@ -151,6 +151,30 @@ function App() {
     setSettings(createInitialSettings());
   }, []);
 
+  useEffect(() => {
+    const interceptorId = axios.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        if (axios.isAxiosError(error) && error.response?.status === 401) {
+          const requestUrl = String(error.config?.url || '');
+          const isLoginRequest = requestUrl.includes('/api/auth/login');
+
+          if (!isLoginRequest && localStorage.getItem(TOKEN_STORAGE_KEY)) {
+            clearSession();
+            setAuthError('सत्र समाप्त हो गया है। कृपया दोबारा लॉगिन करें।');
+            toast.error('सत्र समाप्त हो गया है। कृपया दोबारा लॉगिन करें।');
+          }
+        }
+
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.response.eject(interceptorId);
+    };
+  }, [clearSession]);
+
   const loadAdminUsers = useCallback(
     async (sessionToken = token) => {
       const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {

@@ -22,15 +22,17 @@ ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const storageRoot = process.env.DATA_ROOT
+  ? path.resolve(process.cwd(), process.env.DATA_ROOT)
+  : __dirname;
 
-const uploadsDir = path.join(__dirname, 'uploads');
-const outputsDir = path.join(__dirname, 'outputs');
-const tempDir = path.join(__dirname, 'temp');
-const logosDir = path.join(__dirname, 'logos');
-const assignedVideosDir = path.join(__dirname, 'assigned-videos');
-const dataDir = path.join(__dirname, 'data');
+const uploadsDir = path.join(storageRoot, 'uploads');
+const outputsDir = path.join(storageRoot, 'outputs');
+const tempDir = path.join(storageRoot, 'temp');
+const logosDir = path.join(storageRoot, 'logos');
+const assignedVideosDir = path.join(storageRoot, 'assigned-videos');
+const dataDir = path.join(storageRoot, 'data');
 const usersFile = path.join(dataDir, 'users.json');
-const sessionsFile = path.join(dataDir, 'sessions.json');
 
 for (const dir of [uploadsDir, outputsDir, tempDir, logosDir, assignedVideosDir, dataDir]) {
   fs.ensureDirSync(dir);
@@ -40,16 +42,17 @@ if (!fs.existsSync(usersFile)) {
   fs.writeJsonSync(usersFile, [], { spaces: 2 });
 }
 
-if (!fs.existsSync(sessionsFile)) {
-  fs.writeJsonSync(sessionsFile, [], { spaces: 2 });
-}
-
 const adminUsername = process.env.ADMIN_USERNAME || 'admin';
 const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
+const sessionSecret =
+  process.env.SESSION_SECRET ||
+  crypto.createHash('sha256').update(`${adminUsername}:${adminPassword}`).digest('hex');
+const sessionTtlMs = Number(process.env.SESSION_TTL_HOURS || 24 * 7) * 60 * 60 * 1000;
 const allowedCorsOrigins = String(process.env.CORS_ORIGIN || process.env.FRONTEND_URL || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
+const localAllowedOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
 app.use(cors({
   origin(origin, callback) {
@@ -58,7 +61,12 @@ app.use(cors({
       return;
     }
 
-    if (allowedCorsOrigins.length === 0 || allowedCorsOrigins.includes(origin)) {
+    if (localAllowedOrigins.includes(origin) || allowedCorsOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    if (process.env.NODE_ENV !== 'production' && allowedCorsOrigins.length === 0) {
       callback(null, true);
       return;
     }
@@ -136,14 +144,6 @@ function writeUsers(users) {
   fs.writeJsonSync(usersFile, users, { spaces: 2 });
 }
 
-function readSessions() {
-  return fs.readJsonSync(sessionsFile, { throws: false }) || [];
-}
-
-function writeSessions(sessions) {
-  fs.writeJsonSync(sessionsFile, sessions, { spaces: 2 });
-}
-
 function createPasswordHash(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -158,6 +158,43 @@ function verifyPassword(password, storedHash) {
   const [salt, expectedHash] = storedHash.split(':');
   const actualHash = crypto.scryptSync(password, salt, 64).toString('hex');
   return crypto.timingSafeEqual(Buffer.from(actualHash, 'hex'), Buffer.from(expectedHash, 'hex'));
+}
+
+function createSessionToken(userId) {
+  const payload = Buffer.from(
+    JSON.stringify({
+      userId,
+      exp: Date.now() + sessionTtlMs,
+    })
+  ).toString('base64url');
+  const signature = crypto.createHmac('sha256', sessionSecret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifySessionToken(token) {
+  const [payload, signature] = String(token || '').split('.');
+
+  if (!payload || !signature) {
+    return null;
+  }
+
+  const expectedSignature = crypto.createHmac('sha256', sessionSecret).update(payload).digest('base64url');
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+
+  if (
+    actualBuffer.length !== expectedBuffer.length ||
+    !crypto.timingSafeEqual(actualBuffer, expectedBuffer)
+  ) {
+    return null;
+  }
+
+  const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  if (!decoded?.userId || !decoded?.exp || decoded.exp < Date.now()) {
+    return null;
+  }
+
+  return decoded;
 }
 
 function buildLogoUrl(req, logoFileName) {
@@ -616,9 +653,7 @@ async function authMiddleware(req, res, next) {
       return;
     }
 
-    const sessions = readSessions();
-    const session = sessions.find((item) => item.token === token);
-
+    const session = verifySessionToken(token);
     if (!session) {
       res.status(401).json({ error: 'Invalid session' });
       return;
@@ -665,14 +700,7 @@ app.post('/api/auth/login', (req, res) => {
     return;
   }
 
-  const sessions = readSessions().filter((item) => item.userId !== user.id);
-  const token = uuidv4();
-  sessions.push({
-    token,
-    userId: user.id,
-    createdAt: new Date().toISOString(),
-  });
-  writeSessions(sessions);
+  const token = createSessionToken(user.id);
 
   res.json({
     token,
@@ -687,9 +715,31 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 });
 
 app.post('/api/auth/logout', authMiddleware, (req, res) => {
-  const sessions = readSessions().filter((item) => item.token !== req.sessionToken);
-  writeSessions(sessions);
   res.json({ success: true });
+});
+
+app.get('/', (_req, res) => {
+  res.json({
+    service: 'NewsOverlay Pro Backend',
+    status: 'ok',
+    health: '/health',
+  });
+});
+
+app.get('/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    storageRoot,
+    directories: {
+      uploads: fs.existsSync(uploadsDir),
+      outputs: fs.existsSync(outputsDir),
+      temp: fs.existsSync(tempDir),
+      logos: fs.existsSync(logosDir),
+      assignedVideos: fs.existsSync(assignedVideosDir),
+      data: fs.existsSync(dataDir),
+    },
+  });
 });
 
 app.get('/api/admin/users', authMiddleware, adminOnly, (req, res) => {
@@ -905,6 +955,7 @@ ensureDefaultAdmin();
 
 app.listen(PORT, () => {
   console.log(`NewsOverlay Pro Server running on port ${PORT}`);
+  console.log(`Storage root: ${storageRoot}`);
   console.log(`Upload directory: ${uploadsDir}`);
   console.log(`Output directory: ${outputsDir}`);
   console.log(`Assigned videos directory: ${assignedVideosDir}`);
