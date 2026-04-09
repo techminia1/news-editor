@@ -68,6 +68,7 @@ const cloudinaryEnabled = Boolean(
   process.env.CLOUDINARY_API_KEY &&
   process.env.CLOUDINARY_API_SECRET
 );
+const remoteJobMediaEnabled = process.env.USE_CLOUDINARY_FOR_JOB_FILES === 'true';
 const mongoDbName = process.env.MONGODB_DB_NAME || 'newsoverlay_pro';
 const allowedCorsOrigins = String(process.env.CORS_ORIGIN || process.env.FRONTEND_URL || '')
   .split(',')
@@ -577,6 +578,7 @@ function resolveFontFile(candidates) {
 }
 
 const devanagariFont = resolveFontFile([
+  'C:\\Windows\\Fonts\\Nirmala.ttc',
   'C:\\Windows\\Fonts\\NirmalaB.ttf',
   'C:\\Windows\\Fonts\\Nirmala.ttf',
   'C:\\Windows\\Fonts\\mangal.ttf',
@@ -603,6 +605,12 @@ function escapeFFmpegPath(filePath) {
 
 function fontFileClause(filePath) {
   return filePath ? `:fontfile='${escapeFFmpegPath(filePath)}'` : '';
+}
+
+function drawtextFontOptions(filePath, family = 'Nirmala UI') {
+  const fileClause = fontFileClause(filePath);
+  const familyClause = family ? `:font='${escapeFFmpegText(family)}'` : '';
+  return `${fileClause}${familyClause}`;
 }
 
 function resolveCanvasTextColor(color) {
@@ -981,9 +989,9 @@ async function processVideoWithOverlay(inputPath, outputPath, settings, orientat
     layout.reporterTextMaxWidth,
     layout.lowerBarHeight * 0.55
   );
-  const designationTextFilter = `[base]drawtext=text='${escapeFFmpegText(designationText)}':x=${layout.barTextStartX}:y=${layout.upperBarY + layout.upperBarHeight / 2}-text_h/2:fontsize=${designationFontSize}:fontcolor=${designationTextColor}${fontFileClause(devanagariFont)}[designation]`;
-  const reporterTextFilter = `[designation]drawtext=text='${escapeFFmpegText(reporterText)}':x=${layout.barTextStartX}:y=${layout.lowerBarY + layout.lowerBarHeight / 2}-text_h/2:fontsize=${reporterFontSize}:fontcolor=${reporterTextColor}${fontFileClause(devanagariFont)}[reporter]`;
-  const crawlerTextFilter = `[reporter]drawtext=text='${crawlerText}':x=w-mod(t*${scrollSpeed}\\,w+text_w):y=${layout.crawlerY + layout.crawlerHeight / 2}-text_h/2:fontsize=${layout.crawlerHeight * 0.5}:fontcolor=${crawlerTextColor}${fontFileClause(devanagariFont)}[vout]`;
+  const designationTextFilter = `[base]drawtext=text='${escapeFFmpegText(designationText)}':x=${layout.barTextStartX}:y=${layout.upperBarY + layout.upperBarHeight / 2}-text_h/2:fontsize=${designationFontSize}:fontcolor=${designationTextColor}${drawtextFontOptions(devanagariFont)}:borderw=1:bordercolor=black@0.35[designation]`;
+  const reporterTextFilter = `[designation]drawtext=text='${escapeFFmpegText(reporterText)}':x=${layout.barTextStartX}:y=${layout.lowerBarY + layout.lowerBarHeight / 2}-text_h/2:fontsize=${reporterFontSize}:fontcolor=${reporterTextColor}${drawtextFontOptions(devanagariFont)}:borderw=1:bordercolor=black@0.35[reporter]`;
+  const crawlerTextFilter = `[reporter]drawtext=text='${crawlerText}':x=w-mod(t*${scrollSpeed}\\,w+text_w):y=${layout.crawlerY + layout.crawlerHeight / 2}-text_h/2:fontsize=${layout.crawlerHeight * 0.56}:fontcolor=${crawlerTextColor}${drawtextFontOptions(devanagariFont)}:borderw=2:bordercolor=black@0.65:shadowx=1:shadowy=1[vout]`;
 
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
@@ -1234,6 +1242,7 @@ app.get('/health', (_req, res) => {
     ffmpegInitError: ffmpegInitError?.message || null,
     mongoEnabled,
     cloudinaryEnabled,
+    remoteJobMediaEnabled,
     directories: {
       uploads: fs.existsSync(uploadsDir),
       outputs: fs.existsSync(outputsDir),
@@ -1338,7 +1347,7 @@ app.post('/api/upload', authMiddleware, videoUpload.single('video'), async (req,
     }
 
     const metadataPromise = getVideoMetadata(req.file.path);
-    const remoteUploadPromise = ensureRemoteStorageConfigured()
+    const remoteUploadPromise = ensureRemoteStorageConfigured() && remoteJobMediaEnabled
       ? storeUploadedMedia(
           req.file,
           'upload',
@@ -1353,7 +1362,7 @@ app.post('/api/upload', authMiddleware, videoUpload.single('video'), async (req,
     let fileToken = req.file.filename;
     let videoUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
 
-    if (ensureRemoteStorageConfigured()) {
+    if (ensureRemoteStorageConfigured() && remoteJobMediaEnabled) {
       const media = await remoteUploadPromise;
       const record = {
         id: uuidv4(),
@@ -1423,7 +1432,7 @@ app.post('/api/process', authMiddleware, async (req, res) => {
     let inputPath = path.join(uploadsDir, fileName);
     let tempInputPath = null;
 
-    if (ensureRemoteStorageConfigured()) {
+    if (ensureRemoteStorageConfigured() && remoteJobMediaEnabled) {
       const uploadRecord = await findUploadRecordForUser(req.user.id, fileName);
       if (!uploadRecord?.media) {
         res.status(404).json({ error: 'Video file not found' });
@@ -1451,7 +1460,7 @@ app.post('/api/process', authMiddleware, async (req, res) => {
       outroVideoPath,
     });
 
-    if (ensureRemoteStorageConfigured()) {
+    if (ensureRemoteStorageConfigured() && remoteJobMediaEnabled) {
       const outputMedia = await storeUploadedMedia(
         {
           path: outputPath,
@@ -1498,7 +1507,7 @@ app.post('/api/process', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/download/:filename', authMiddleware, async (req, res) => {
-  if (ensureRemoteStorageConfigured()) {
+  if (ensureRemoteStorageConfigured() && remoteJobMediaEnabled) {
     const outputRecord = await findOutputRecordForUser(req.user.id, req.params.filename);
 
     if (!outputRecord?.media?.secureUrl) {
