@@ -15,6 +15,8 @@ const ffprobeInstaller = require('@ffprobe-installer/ffprobe');
 const PImage = require('pureimage');
 const path = require('path');
 const fs = require('fs-extra');
+const { MongoClient } = require('mongodb');
+const { v2: cloudinary } = require('cloudinary');
 const { v4: uuidv4 } = require('uuid');
 
 let ffmpegReady = false;
@@ -60,11 +62,28 @@ const sessionSecret =
   process.env.SESSION_SECRET ||
   crypto.createHash('sha256').update(`${adminUsername}:${adminPassword}`).digest('hex');
 const sessionTtlMs = Number(process.env.SESSION_TTL_HOURS || 24 * 7) * 60 * 60 * 1000;
+const mongoEnabled = Boolean(process.env.MONGODB_URI);
+const cloudinaryEnabled = Boolean(
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET
+);
+const mongoDbName = process.env.MONGODB_DB_NAME || 'newsoverlay_pro';
 const allowedCorsOrigins = String(process.env.CORS_ORIGIN || process.env.FRONTEND_URL || '')
   .split(',')
   .map((value) => value.trim())
   .filter(Boolean);
 const localAllowedOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+let databasePromise = null;
+
+if (cloudinaryEnabled) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+}
 
 app.use(cors({
   origin(origin, callback) {
@@ -142,10 +161,70 @@ const adminAssetUpload = multer({
 function normalizeUserRecord(user) {
   return {
     ...user,
-    logoFileName: user.logoFileName || null,
-    introVideoFileName: user.introVideoFileName || null,
-    outroVideoFileName: user.outroVideoFileName || null,
+    logo: normalizeMediaAsset(user.logo, user.logoFileName, 'image', 'logo'),
+    introVideo: normalizeMediaAsset(user.introVideo, user.introVideoFileName, 'video', 'assignedVideo'),
+    outroVideo: normalizeMediaAsset(user.outroVideo, user.outroVideoFileName, 'video', 'assignedVideo'),
   };
+}
+
+function normalizeMediaAsset(asset, legacyFileName, resourceType, kind) {
+  if (asset?.secureUrl || asset?.localFileName) {
+    return {
+      provider: asset.provider || (asset.secureUrl ? 'cloudinary' : 'local'),
+      publicId: asset.publicId || null,
+      secureUrl: asset.secureUrl || null,
+      resourceType: asset.resourceType || resourceType,
+      kind: asset.kind || kind,
+      format: asset.format || null,
+      originalName: asset.originalName || null,
+      localFileName: asset.localFileName || null,
+      bytes: asset.bytes || null,
+    };
+  }
+
+  if (!legacyFileName) {
+    return null;
+  }
+
+  return {
+    provider: 'local',
+    publicId: null,
+    secureUrl: null,
+    resourceType,
+    kind,
+    format: path.extname(legacyFileName).replace('.', '') || null,
+    originalName: legacyFileName,
+    localFileName: legacyFileName,
+    bytes: null,
+  };
+}
+
+function getLocalAssetBaseDir(kind) {
+  if (kind === 'logo') {
+    return logosDir;
+  }
+
+  if (kind === 'assignedVideo') {
+    return assignedVideosDir;
+  }
+
+  if (kind === 'upload') {
+    return uploadsDir;
+  }
+
+  if (kind === 'output') {
+    return outputsDir;
+  }
+
+  return storageRoot;
+}
+
+function getLocalAssetPath(asset) {
+  if (!asset?.localFileName) {
+    return null;
+  }
+
+  return path.join(getLocalAssetBaseDir(asset.kind), asset.localFileName);
 }
 
 function readUsers() {
@@ -154,6 +233,110 @@ function readUsers() {
 
 function writeUsers(users) {
   fs.writeJsonSync(usersFile, users, { spaces: 2 });
+}
+
+async function getDatabase() {
+  if (!mongoEnabled) {
+    return null;
+  }
+
+  if (!databasePromise) {
+    const client = new MongoClient(process.env.MONGODB_URI);
+    databasePromise = client.connect().then((connectedClient) => connectedClient.db(mongoDbName));
+  }
+
+  return databasePromise;
+}
+
+async function getCollection(name) {
+  const database = await getDatabase();
+  if (!database) {
+    return null;
+  }
+
+  return database.collection(name);
+}
+
+async function listUsers() {
+  if (!mongoEnabled) {
+    return readUsers();
+  }
+
+  const collection = await getCollection('users');
+  return (await collection.find({}).sort({ createdAt: -1 }).toArray()).map(normalizeUserRecord);
+}
+
+async function findUserById(id) {
+  if (!mongoEnabled) {
+    return readUsers().find((user) => user.id === id) || null;
+  }
+
+  const collection = await getCollection('users');
+  const user = await collection.findOne({ id });
+  return user ? normalizeUserRecord(user) : null;
+}
+
+async function findUserByUsername(username) {
+  const normalizedUsername = String(username || '').trim().toLowerCase();
+
+  if (!mongoEnabled) {
+    return readUsers().find((user) => user.username.toLowerCase() === normalizedUsername) || null;
+  }
+
+  const collection = await getCollection('users');
+  const user = await collection.findOne({ username: normalizedUsername });
+  return user ? normalizeUserRecord(user) : null;
+}
+
+async function insertUser(user) {
+  if (!mongoEnabled) {
+    const users = readUsers();
+    users.push(user);
+    writeUsers(users);
+    return user;
+  }
+
+  const collection = await getCollection('users');
+  await collection.insertOne(user);
+  return normalizeUserRecord(user);
+}
+
+async function insertUploadRecord(record) {
+  if (!mongoEnabled) {
+    return record;
+  }
+
+  const collection = await getCollection('uploads');
+  await collection.insertOne(record);
+  return record;
+}
+
+async function findUploadRecordForUser(ownerUserId, id) {
+  if (!mongoEnabled) {
+    return null;
+  }
+
+  const collection = await getCollection('uploads');
+  return collection.findOne({ id, ownerUserId });
+}
+
+async function insertOutputRecord(record) {
+  if (!mongoEnabled) {
+    return record;
+  }
+
+  const collection = await getCollection('outputs');
+  await collection.insertOne(record);
+  return record;
+}
+
+async function findOutputRecordForUser(ownerUserId, id) {
+  if (!mongoEnabled) {
+    return null;
+  }
+
+  const collection = await getCollection('outputs');
+  return collection.findOne({ id, ownerUserId });
 }
 
 function createPasswordHash(password) {
@@ -170,6 +353,14 @@ function verifyPassword(password, storedHash) {
   const [salt, expectedHash] = storedHash.split(':');
   const actualHash = crypto.scryptSync(password, salt, 64).toString('hex');
   return crypto.timingSafeEqual(Buffer.from(actualHash, 'hex'), Buffer.from(expectedHash, 'hex'));
+}
+
+function ensureRemoteStorageConfigured() {
+  if (!mongoEnabled || !cloudinaryEnabled) {
+    return false;
+  }
+
+  return true;
 }
 
 function createSessionToken(userId) {
@@ -209,56 +400,165 @@ function verifySessionToken(token) {
   return decoded;
 }
 
-function buildLogoUrl(req, logoFileName) {
-  if (!logoFileName) {
+function buildMediaUrl(req, asset) {
+  if (!asset) {
     return null;
   }
 
-  return `${req.protocol}://${req.get('host')}/logos/${logoFileName}`;
-}
-
-function buildAssignedVideoUrl(req, fileName) {
-  if (!fileName) {
-    return null;
+  if (asset.secureUrl) {
+    return asset.secureUrl;
   }
 
-  return `${req.protocol}://${req.get('host')}/assigned-videos/${fileName}`;
+  if (asset.localFileName) {
+    const routePrefix = asset.kind === 'logo' ? '/logos' : asset.kind === 'assignedVideo' ? '/assigned-videos' : null;
+    if (!routePrefix) {
+      return null;
+    }
+
+    return `${req.protocol}://${req.get('host')}${routePrefix}/${asset.localFileName}`;
+  }
+
+  return null;
 }
 
 function sanitizeUser(req, user) {
+  const normalizedUser = normalizeUserRecord(user);
   return {
-    id: user.id,
-    username: user.username,
-    displayName: user.displayName,
-    role: user.role,
-    logoUrl: buildLogoUrl(req, user.logoFileName),
-    introVideoUrl: buildAssignedVideoUrl(req, user.introVideoFileName),
-    outroVideoUrl: buildAssignedVideoUrl(req, user.outroVideoFileName),
-    createdAt: user.createdAt,
+    id: normalizedUser.id,
+    username: normalizedUser.username,
+    displayName: normalizedUser.displayName,
+    role: normalizedUser.role,
+    logoUrl: buildMediaUrl(req, normalizedUser.logo),
+    introVideoUrl: buildMediaUrl(req, normalizedUser.introVideo),
+    outroVideoUrl: buildMediaUrl(req, normalizedUser.outroVideo),
+    createdAt: normalizedUser.createdAt,
   };
 }
 
-function ensureDefaultAdmin() {
-  const users = readUsers();
-  const existingAdmin = users.find((user) => user.role === 'admin');
+async function uploadFileToCloudinary(filePath, options) {
+  const { folder, resourceType, publicId } = options;
+
+  if (resourceType === 'video') {
+    return new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_chunked_stream(
+        {
+          folder,
+          public_id: publicId,
+          resource_type: 'video',
+          overwrite: true,
+        },
+        (error, result) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve(result);
+        }
+      );
+
+      fs.createReadStream(filePath)
+        .on('error', reject)
+        .pipe(uploadStream)
+        .on('error', reject);
+    });
+  }
+
+  return cloudinary.uploader.upload(filePath, {
+    folder,
+    public_id: publicId,
+    resource_type: 'image',
+    overwrite: true,
+  });
+}
+
+async function storeUploadedMedia(file, kind, resourceType, folder) {
+  if (!file) {
+    return null;
+  }
+
+  if (ensureRemoteStorageConfigured()) {
+    try {
+      const result = await uploadFileToCloudinary(file.path, {
+        folder,
+        resourceType,
+        publicId: uuidv4(),
+      });
+
+      return {
+        provider: 'cloudinary',
+        publicId: result.public_id,
+        secureUrl: result.secure_url,
+        resourceType,
+        kind,
+        format: result.format || path.extname(file.originalname).replace('.', '') || null,
+        originalName: file.originalname,
+        localFileName: null,
+        bytes: result.bytes || null,
+      };
+    } finally {
+      await fs.remove(file.path).catch(() => {});
+    }
+  }
+
+  return {
+    provider: 'local',
+    publicId: null,
+    secureUrl: null,
+    resourceType,
+    kind,
+    format: path.extname(file.originalname).replace('.', '') || null,
+    originalName: file.originalname,
+    localFileName: file.filename,
+    bytes: file.size || null,
+  };
+}
+
+async function materializeMediaAsset(asset, fallbackExt) {
+  if (!asset) {
+    return null;
+  }
+
+  if (asset.provider !== 'cloudinary' || !asset.secureUrl) {
+    return getLocalAssetPath(asset);
+  }
+
+  const extension = asset.format || fallbackExt || (asset.resourceType === 'image' ? 'png' : 'mp4');
+  const targetPath = path.join(tempDir, `${asset.kind || 'asset'}_${uuidv4()}.${extension}`);
+  const response = await fetch(asset.secureUrl);
+
+  if (!response.ok) {
+    throw new Error(`Failed to download media asset: ${response.status}`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  await fs.writeFile(targetPath, buffer);
+  return targetPath;
+}
+
+async function ensureDefaultAdmin() {
+  const existingAdmin = mongoEnabled
+    ? (await getCollection('users')).findOne({ role: 'admin' })
+    : readUsers().find((user) => user.role === 'admin');
 
   if (existingAdmin) {
     return;
   }
 
-  users.push({
+  await insertUser({
     id: uuidv4(),
     username: adminUsername,
     displayName: 'Administrator',
     role: 'admin',
     passwordHash: createPasswordHash(adminPassword),
+    logo: null,
+    introVideo: null,
+    outroVideo: null,
     logoFileName: null,
     introVideoFileName: null,
     outroVideoFileName: null,
     createdAt: new Date().toISOString(),
   });
-
-  writeUsers(users);
   console.log(`Seeded default admin user: ${adminUsername}`);
 }
 
@@ -852,8 +1152,7 @@ async function authMiddleware(req, res, next) {
       return;
     }
 
-    const users = readUsers();
-    const user = users.find((item) => item.id === session.userId);
+    const user = await findUserById(session.userId);
 
     if (!user) {
       res.status(401).json({ error: 'User not found' });
@@ -878,6 +1177,7 @@ function adminOnly(req, res, next) {
 }
 
 app.post('/api/auth/login', (req, res) => {
+  void (async () => {
   const { username, password } = req.body || {};
 
   if (!username || !password) {
@@ -885,8 +1185,7 @@ app.post('/api/auth/login', (req, res) => {
     return;
   }
 
-  const users = readUsers();
-  const user = users.find((item) => item.username.toLowerCase() === String(username).trim().toLowerCase());
+  const user = await findUserByUsername(username);
 
   if (!user || !verifyPassword(password, user.passwordHash)) {
     res.status(401).json({ error: 'Invalid username or password' });
@@ -898,6 +1197,9 @@ app.post('/api/auth/login', (req, res) => {
   res.json({
     token,
     user: sanitizeUser(req, user),
+  });
+  })().catch((error) => {
+    res.status(500).json({ error: 'Login failed', details: error.message });
   });
 });
 
@@ -926,6 +1228,8 @@ app.get('/health', (_req, res) => {
     storageRoot,
     ffmpegReady,
     ffmpegInitError: ffmpegInitError?.message || null,
+    mongoEnabled,
+    cloudinaryEnabled,
     directories: {
       uploads: fs.existsSync(uploadsDir),
       outputs: fs.existsSync(outputsDir),
@@ -937,8 +1241,8 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.get('/api/admin/users', authMiddleware, adminOnly, (req, res) => {
-  const users = readUsers();
+app.get('/api/admin/users', authMiddleware, adminOnly, async (req, res) => {
+  const users = await listUsers();
   res.json({
     users: users.map((user) => sanitizeUser(req, user)),
   });
@@ -977,29 +1281,40 @@ app.post(
         return;
       }
 
-      const users = readUsers();
       const normalizedUsername = String(username).trim().toLowerCase();
 
-      if (users.some((user) => user.username.toLowerCase() === normalizedUsername)) {
+      if (await findUserByUsername(normalizedUsername)) {
         await removeFiles(uploadedFiles.map((file) => file.path));
         res.status(409).json({ error: 'Username already exists' });
         return;
       }
 
-      const user = {
+      const user = normalizeUserRecord({
         id: uuidv4(),
         username: normalizedUsername,
         displayName: String(displayName).trim(),
         role: 'user',
         passwordHash: createPasswordHash(String(password)),
-        logoFileName: logoFile.filename,
-        introVideoFileName: introFile ? introFile.filename : null,
-        outroVideoFileName: outroFile ? outroFile.filename : null,
+        logo: await storeUploadedMedia(logoFile, 'logo', 'image', `newsoverlay-pro/users/${normalizedUsername}/logos`),
+        introVideo: await storeUploadedMedia(
+          introFile,
+          'assignedVideo',
+          'video',
+          `newsoverlay-pro/users/${normalizedUsername}/intro`
+        ),
+        outroVideo: await storeUploadedMedia(
+          outroFile,
+          'assignedVideo',
+          'video',
+          `newsoverlay-pro/users/${normalizedUsername}/outro`
+        ),
+        logoFileName: null,
+        introVideoFileName: null,
+        outroVideoFileName: null,
         createdAt: new Date().toISOString(),
-      };
+      });
 
-      users.push(user);
-      writeUsers(users);
+      await insertUser(user);
 
       res.status(201).json({
         user: sanitizeUser(req, user),
@@ -1020,12 +1335,34 @@ app.post('/api/upload', authMiddleware, videoUpload.single('video'), async (req,
 
     const metadata = await getVideoMetadata(req.file.path);
     const orientation = metadata.width > metadata.height ? 'landscape' : 'portrait';
+    let fileToken = req.file.filename;
+    let videoUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+
+    if (ensureRemoteStorageConfigured()) {
+      const media = await storeUploadedMedia(
+        req.file,
+        'upload',
+        'video',
+        `newsoverlay-pro/users/${req.user.id}/uploads`
+      );
+      const record = {
+        id: uuidv4(),
+        ownerUserId: req.user.id,
+        originalName: req.file.originalname,
+        media,
+        createdAt: new Date().toISOString(),
+      };
+      await insertUploadRecord(record);
+      fileToken = record.id;
+      videoUrl = media.secureUrl;
+    }
 
     res.json({
       success: true,
-      fileName: req.file.filename,
+      fileName: fileToken,
       originalName: req.file.originalname,
       orientation,
+      videoUrl,
       dimensions: {
         width: metadata.width,
         height: metadata.height,
@@ -1048,11 +1385,11 @@ app.post('/api/preview', authMiddleware, async (req, res) => {
     }
 
     const overlayPath = path.join(tempDir, `preview_${uuidv4()}.png`);
-    const logoPath = req.user.logoFileName ? path.join(logosDir, req.user.logoFileName) : null;
+    const logoPath = await materializeMediaAsset(req.user.logo, 'png');
     await createOverlayImage(overlayPath, settings, orientation, width, height, logoPath);
 
     res.sendFile(overlayPath, async (err) => {
-      await fs.remove(overlayPath).catch(() => {});
+      await removeFiles([overlayPath, logoPath && logoPath.startsWith(tempDir) ? logoPath : null]);
       if (err) {
         console.error('Preview send error:', err);
       }
@@ -1072,8 +1409,19 @@ app.post('/api/process', authMiddleware, async (req, res) => {
       return;
     }
 
-    const inputPath = path.join(uploadsDir, fileName);
-    if (!fs.existsSync(inputPath)) {
+    let inputPath = path.join(uploadsDir, fileName);
+    let tempInputPath = null;
+
+    if (ensureRemoteStorageConfigured()) {
+      const uploadRecord = await findUploadRecordForUser(req.user.id, fileName);
+      if (!uploadRecord?.media) {
+        res.status(404).json({ error: 'Video file not found' });
+        return;
+      }
+
+      tempInputPath = await materializeMediaAsset(uploadRecord.media, 'mp4');
+      inputPath = tempInputPath;
+    } else if (!fs.existsSync(inputPath)) {
       res.status(404).json({ error: 'Video file not found' });
       return;
     }
@@ -1082,12 +1430,50 @@ app.post('/api/process', authMiddleware, async (req, res) => {
     const orientation = metadata.width > metadata.height ? 'landscape' : 'portrait';
     const outputFileName = `processed_${uuidv4()}.mp4`;
     const outputPath = path.join(outputsDir, outputFileName);
+    const logoPath = await materializeMediaAsset(req.user.logo, 'png');
+    const introVideoPath = await materializeMediaAsset(req.user.introVideo, 'mp4');
+    const outroVideoPath = await materializeMediaAsset(req.user.outroVideo, 'mp4');
 
     await processVideoComposition(inputPath, outputPath, settings, orientation, metadata, {
-      logoPath: req.user.logoFileName ? path.join(logosDir, req.user.logoFileName) : null,
-      introVideoPath: req.user.introVideoFileName ? path.join(assignedVideosDir, req.user.introVideoFileName) : null,
-      outroVideoPath: req.user.outroVideoFileName ? path.join(assignedVideosDir, req.user.outroVideoFileName) : null,
+      logoPath,
+      introVideoPath,
+      outroVideoPath,
     });
+
+    if (ensureRemoteStorageConfigured()) {
+      const outputMedia = await storeUploadedMedia(
+        {
+          path: outputPath,
+          originalname: outputFileName,
+          filename: outputFileName,
+          size: (await fs.stat(outputPath)).size,
+        },
+        'output',
+        'video',
+        `newsoverlay-pro/users/${req.user.id}/outputs`
+      );
+      const outputRecord = {
+        id: uuidv4(),
+        ownerUserId: req.user.id,
+        originalName: outputFileName,
+        media: outputMedia,
+        createdAt: new Date().toISOString(),
+      };
+      await insertOutputRecord(outputRecord);
+      await removeFiles([
+        tempInputPath,
+        logoPath && logoPath.startsWith(tempDir) ? logoPath : null,
+        introVideoPath && introVideoPath.startsWith(tempDir) ? introVideoPath : null,
+        outroVideoPath && outroVideoPath.startsWith(tempDir) ? outroVideoPath : null,
+      ]);
+
+      res.json({
+        success: true,
+        outputFile: outputRecord.id,
+        downloadUrl: `/api/download/${outputRecord.id}`,
+      });
+      return;
+    }
 
     res.json({
       success: true,
@@ -1100,7 +1486,31 @@ app.post('/api/process', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/download/:filename', authMiddleware, (req, res) => {
+app.get('/api/download/:filename', authMiddleware, async (req, res) => {
+  if (ensureRemoteStorageConfigured()) {
+    const outputRecord = await findOutputRecordForUser(req.user.id, req.params.filename);
+
+    if (!outputRecord?.media?.secureUrl) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+
+    const response = await fetch(outputRecord.media.secureUrl);
+
+    if (!response.ok) {
+      res.status(502).json({ error: 'Failed to fetch processed file' });
+      return;
+    }
+
+    const extension = outputRecord.media.format || 'mp4';
+    const downloadName = `${outputRecord.originalName || outputRecord.id}.${extension}`.replace(/\.+/, '.');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+    res.send(buffer);
+    return;
+  }
+
   const filePath = path.join(outputsDir, req.params.filename);
 
   if (!fs.existsSync(filePath)) {
@@ -1146,16 +1556,22 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-ensureDefaultAdmin();
+const startupPromise = ensureDefaultAdmin().catch((error) => {
+  console.error(`Startup initialization failed: ${error.message}`);
+});
 
 if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`NewsOverlay Pro Server running on port ${PORT}`);
-    console.log(`Storage root: ${storageRoot}`);
-    console.log(`Upload directory: ${uploadsDir}`);
-    console.log(`Output directory: ${outputsDir}`);
-    console.log(`Assigned videos directory: ${assignedVideosDir}`);
-    console.log(`Default admin username: ${adminUsername}`);
+  startupPromise.then(() => {
+    app.listen(PORT, () => {
+      console.log(`NewsOverlay Pro Server running on port ${PORT}`);
+      console.log(`Storage root: ${storageRoot}`);
+      console.log(`Upload directory: ${uploadsDir}`);
+      console.log(`Output directory: ${outputsDir}`);
+      console.log(`Assigned videos directory: ${assignedVideosDir}`);
+      console.log(`Default admin username: ${adminUsername}`);
+      console.log(`MongoDB enabled: ${mongoEnabled}`);
+      console.log(`Cloudinary enabled: ${cloudinaryEnabled}`);
+    });
   });
 }
 

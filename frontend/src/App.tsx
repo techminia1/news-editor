@@ -455,7 +455,7 @@ function App() {
           headers: { ...authHeaders, 'Content-Type': 'multipart/form-data' },
         });
         setUploadedVideo(response.data);
-        setVideoUrl(`${API_BASE_URL}/uploads/${response.data.fileName}`);
+        setVideoUrl(response.data.videoUrl || `${API_BASE_URL}/uploads/${response.data.fileName}`);
         toast.success('वीडियो सफलतापूर्वक अपलोड हो गया', { id: 'video-upload' });
       } catch (err) {
         const message = getErrorMessage(err, 'वीडियो अपलोड नहीं हो सका');

@@ -20,6 +20,7 @@ export const PORTRAIT_DEFAULTS = {
 export interface VideoInfo {
   fileName: string;
   originalName: string;
+  videoUrl?: string;
   orientation: 'landscape' | 'portrait';
   dimensions: { width: number; height: number };
   duration: number;

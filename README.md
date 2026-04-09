@@ -31,7 +31,9 @@ A complete MERN stack web application for adding professional news channel style
 - Node.js + Express
 - Multer (file upload)
 - Fluent-FFmpeg (video processing)
-- Canvas (overlay generation)
+- PureImage / Canvas fallback (overlay generation)
+- MongoDB (users, uploads, output metadata)
+- Cloudinary (logos, intro/outro, uploaded videos, processed outputs)
 
 ## Project Structure
 
@@ -125,9 +127,11 @@ npm run build
 ### Recommended Hosting Setup
 
 - **Frontend**: Vercel
-- **Backend**: Railway or Render
+- **Backend**: Node host with FFmpeg support
+- **Database**: MongoDB Atlas
+- **Media Storage**: Cloudinary
 
-This project uses Express, FFmpeg, temporary files, and generated video outputs in the backend. Because of that, the frontend is a great fit for Vercel, but the backend should run on a long-running Node host such as Railway or Render instead of a basic serverless-only setup.
+The backend now supports persistent storage with MongoDB + Cloudinary. Users, assigned logos, intro/outro media, uploaded source videos, and processed output metadata can all survive restarts when these environment variables are configured.
 
 ### Frontend on Vercel
 
@@ -160,10 +164,20 @@ VITE_API_BASE_URL=https://your-backend-domain.com
 CORS_ORIGIN=https://your-project.vercel.app
 ```
 
-6. Add a strong `SESSION_SECRET` value in production.
-7. Optional but recommended: set `DATA_ROOT` to a persistent mounted path if your host supports persistent disks.
-8. Deploy the backend.
-9. Copy the deployed backend URL and paste it into the frontend Vercel variable:
+6. Add MongoDB Atlas and Cloudinary credentials:
+
+```env
+MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB_NAME=newsoverlay_pro
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-cloudinary-api-key
+CLOUDINARY_API_SECRET=your-cloudinary-api-secret
+```
+
+7. Add a strong `SESSION_SECRET` value in production.
+8. Optional: set `DATA_ROOT` for temporary working files if your host supports a persistent or larger disk.
+9. Deploy the backend.
+10. Copy the deployed backend URL and paste it into the frontend Vercel variable:
 
 ```env
 VITE_API_BASE_URL=https://your-backend-domain.com
@@ -238,6 +252,11 @@ SESSION_SECRET=replace-with-a-long-random-secret
 SESSION_TTL_HOURS=168
 CORS_ORIGIN=http://localhost:5173,https://your-frontend-domain.vercel.app
 DATA_ROOT=./
+MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB_NAME=newsoverlay_pro
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-cloudinary-api-key
+CLOUDINARY_API_SECRET=your-cloudinary-api-secret
 ```
 
 ## Troubleshooting
@@ -258,10 +277,15 @@ DATA_ROOT=./
 - Ensure backend is running on port 5000
 - Check CORS settings in server.js
 
+### MongoDB / Cloudinary not active
+- Check `/health` on the backend
+- Confirm `mongoEnabled` and `cloudinaryEnabled` are `true`
+- Verify Atlas network access and Cloudinary credentials
+
 ## License
 
 MIT License
 
 ## Credits
 
-Built with React, Express, FFmpeg, and Node Canvas
+Built with React, Express, FFmpeg, MongoDB, Cloudinary, and PureImage
