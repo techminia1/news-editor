@@ -12,7 +12,7 @@ const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const ffprobeInstaller = require('@ffprobe-installer/ffprobe');
-const { createCanvas, loadImage } = require('canvas');
+const PImage = require('pureimage');
 const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
@@ -270,6 +270,7 @@ const devanagariFont = resolveFontFile([
   '/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf',
   '/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf',
 ]);
+let canvasModule;
 
 function escapeFFmpegText(text) {
   return String(text || '')
@@ -299,10 +300,44 @@ function resolveFFmpegTextColor(color) {
   return color === 'black' ? 'black' : 'white';
 }
 
+function getCanvasModule() {
+  if (canvasModule !== undefined) {
+    return canvasModule;
+  }
+
+  try {
+    canvasModule = require('canvas');
+  } catch (error) {
+    console.warn(`Canvas unavailable, falling back to PureImage: ${error.message}`);
+    canvasModule = null;
+  }
+
+  return canvasModule;
+}
+
 async function removeFiles(paths) {
   await Promise.all(
     (paths || []).filter(Boolean).map((filePath) => fs.remove(filePath).catch(() => {}))
   );
+}
+
+function estimateTextWidth(text, fontSize) {
+  const safeText = String(text || '').trim();
+  const devanagariChars = (safeText.match(/[\u0900-\u097F]/g) || []).length;
+  const latinChars = safeText.length - devanagariChars;
+  return devanagariChars * fontSize * 0.9 + latinChars * fontSize * 0.62;
+}
+
+function getFittedFontSize(text, maxWidth, baseFontSize) {
+  const safeText = String(text || '').trim();
+  const minFontSize = Math.max(14, Math.round(baseFontSize * 0.52));
+  let fontSize = Math.round(baseFontSize);
+
+  while (fontSize > minFontSize && estimateTextWidth(safeText, fontSize) > maxWidth) {
+    fontSize -= 1;
+  }
+
+  return fontSize;
 }
 
 function drawFittedText(ctx, text, x, y, maxWidth, baseFontSize) {
@@ -389,7 +424,7 @@ function getOverlayLayout(orientation, width, height) {
   };
 }
 
-async function drawAssignedLogo(ctx, layout, colors, logoPath) {
+async function drawAssignedLogoWithCanvas(ctx, layout, colors, logoPath, loadImage) {
   const centerX = layout.logoX + layout.logoSize / 2;
   const centerY = layout.logoY + layout.logoSize / 2;
   const radius = layout.logoSize / 2;
@@ -437,8 +472,82 @@ async function drawAssignedLogo(ctx, layout, colors, logoPath) {
   ctx.fillText('NEWS', centerX, centerY);
 }
 
-async function createOverlayImage(overlayPath, settings, orientation, width, height, logoPath) {
-  const canvas = createCanvas(width, height);
+async function loadPureImageBitmap(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  let decoder = null;
+
+  if (extension === '.png') {
+    decoder = PImage.decodePNGFromStream;
+  } else if (extension === '.jpg' || extension === '.jpeg') {
+    decoder = PImage.decodeJPEGFromStream;
+  }
+
+  if (!decoder) {
+    return null;
+  }
+
+  const stream = fs.createReadStream(filePath);
+
+  try {
+    return await decoder(stream);
+  } finally {
+    stream.destroy();
+  }
+}
+
+async function drawAssignedLogoWithPureImage(ctx, layout, colors, logoPath) {
+  const centerX = layout.logoX + layout.logoSize / 2;
+  const centerY = layout.logoY + layout.logoSize / 2;
+  const radius = layout.logoSize / 2;
+
+  if (logoPath && fs.existsSync(logoPath)) {
+    const image = await loadPureImageBitmap(logoPath).catch(() => null);
+
+    if (image) {
+      const imageAspect = image.width / image.height;
+      let drawWidth = layout.logoSize;
+      let drawHeight = layout.logoSize;
+      let drawX = layout.logoX;
+      let drawY = layout.logoY;
+
+      if (imageAspect > 1) {
+        drawWidth = layout.logoSize * imageAspect;
+        drawX = layout.logoX - (drawWidth - layout.logoSize) / 2;
+      } else {
+        drawHeight = layout.logoSize / imageAspect;
+        drawY = layout.logoY - (drawHeight - layout.logoSize) / 2;
+      }
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2, false);
+      ctx.clip();
+      ctx.drawImage(image, drawX, drawY, drawWidth, drawHeight);
+      ctx.restore();
+
+      ctx.lineWidth = Math.max(3, layout.logoSize * 0.04);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius - ctx.lineWidth / 2, 0, Math.PI * 2, false);
+      ctx.stroke();
+      return;
+    }
+  }
+
+  ctx.fillStyle = colors.logoBg;
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius, 0, Math.PI * 2, false);
+  ctx.fill();
+
+  ctx.lineWidth = Math.max(3, layout.logoSize * 0.04);
+  ctx.strokeStyle = '#FFFFFF';
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius - ctx.lineWidth / 2, 0, Math.PI * 2, false);
+  ctx.stroke();
+}
+
+async function createOverlayImageWithCanvas(canvasLib, overlayPath, settings, orientation, width, height, logoPath) {
+  const canvas = canvasLib.createCanvas(width, height);
   const ctx = canvas.getContext('2d');
   const layout = getOverlayLayout(orientation, width, height);
   const { colors, reporterName, textColors = {} } = settings;
@@ -477,10 +586,49 @@ async function createOverlayImage(overlayPath, settings, orientation, width, hei
   ctx.fillRect(0, layout.crawlerY, width, layout.crawlerHeight);
   ctx.fillStyle = colors.crawlerLine;
   ctx.fillRect(0, layout.crawlerY, layout.lineWidth, layout.crawlerHeight);
-  await drawAssignedLogo(ctx, layout, colors, logoPath);
+  await drawAssignedLogoWithCanvas(ctx, layout, colors, logoPath, canvasLib.loadImage);
 
   await fs.writeFile(overlayPath, canvas.toBuffer('image/png'));
   return layout;
+}
+
+async function createOverlayImageWithPureImage(overlayPath, settings, orientation, width, height, logoPath) {
+  const image = PImage.make(width, height);
+  const ctx = image.getContext('2d');
+  const layout = getOverlayLayout(orientation, width, height);
+  const { colors } = settings;
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = colors.designationBar;
+  ctx.fillRect(layout.upperBarX, layout.upperBarY, layout.upperBarWidth, layout.upperBarHeight);
+  ctx.fillStyle = colors.reporterBar;
+  ctx.fillRect(layout.upperBarX, layout.lowerBarY, layout.lowerBarWidth, layout.lowerBarHeight);
+  ctx.fillStyle = colors.crawlerBar;
+  ctx.fillRect(0, layout.crawlerY, width, layout.crawlerHeight);
+  ctx.fillStyle = colors.crawlerLine;
+  ctx.fillRect(0, layout.crawlerY, layout.lineWidth, layout.crawlerHeight);
+  await drawAssignedLogoWithPureImage(ctx, layout, colors, logoPath);
+
+  await PImage.encodePNGToStream(image, fs.createWriteStream(overlayPath));
+  return layout;
+}
+
+async function createOverlayImage(overlayPath, settings, orientation, width, height, logoPath) {
+  const availableCanvasModule = getCanvasModule();
+
+  if (availableCanvasModule) {
+    return createOverlayImageWithCanvas(
+      availableCanvasModule,
+      overlayPath,
+      settings,
+      orientation,
+      width,
+      height,
+      logoPath
+    );
+  }
+
+  return createOverlayImageWithPureImage(overlayPath, settings, orientation, width, height, logoPath);
 }
 
 async function processVideoWithOverlay(inputPath, outputPath, settings, orientation, videoInfo, logoPath) {
@@ -494,14 +642,35 @@ async function processVideoWithOverlay(inputPath, outputPath, settings, orientat
     logoPath
   );
   const scrollSpeed = videoInfo.width / 8;
+  const designationText = 'संवाददाता';
+  const reporterText = settings.reporterName || 'अनिल मोर्या';
   const crawlerText = escapeFFmpegText(settings.crawlerText || 'आज की मुख्य हेडलाइंस यहां दिखेंगी...');
+  const designationTextColor = resolveFFmpegTextColor(settings.textColors?.designation);
+  const reporterTextColor = resolveFFmpegTextColor(settings.textColors?.reporter);
   const crawlerTextColor = resolveFFmpegTextColor(settings.textColors?.crawler);
-  const drawTextFilter = `[base]drawtext=text='${crawlerText}':x=w-mod(t*${scrollSpeed}\\,w+text_w):y=${layout.crawlerY + layout.crawlerHeight / 2}-text_h/2:fontsize=${layout.crawlerHeight * 0.5}:fontcolor=${crawlerTextColor}${fontFileClause(devanagariFont)}[vout]`;
+  const designationFontSize = getFittedFontSize(
+    designationText,
+    layout.designationTextMaxWidth,
+    layout.upperBarHeight * 0.6
+  );
+  const reporterFontSize = getFittedFontSize(
+    reporterText,
+    layout.reporterTextMaxWidth,
+    layout.lowerBarHeight * 0.55
+  );
+  const designationTextFilter = `[base]drawtext=text='${escapeFFmpegText(designationText)}':x=${layout.barTextStartX}:y=${layout.upperBarY + layout.upperBarHeight / 2}-text_h/2:fontsize=${designationFontSize}:fontcolor=${designationTextColor}${fontFileClause(devanagariFont)}[designation]`;
+  const reporterTextFilter = `[designation]drawtext=text='${escapeFFmpegText(reporterText)}':x=${layout.barTextStartX}:y=${layout.lowerBarY + layout.lowerBarHeight / 2}-text_h/2:fontsize=${reporterFontSize}:fontcolor=${reporterTextColor}${fontFileClause(devanagariFont)}[reporter]`;
+  const crawlerTextFilter = `[reporter]drawtext=text='${crawlerText}':x=w-mod(t*${scrollSpeed}\\,w+text_w):y=${layout.crawlerY + layout.crawlerHeight / 2}-text_h/2:fontsize=${layout.crawlerHeight * 0.5}:fontcolor=${crawlerTextColor}${fontFileClause(devanagariFont)}[vout]`;
 
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
       .input(overlayPath)
-      .complexFilter(['[0:v][1:v]overlay=0:0[base]', drawTextFilter])
+      .complexFilter([
+        '[0:v][1:v]overlay=0:0[base]',
+        designationTextFilter,
+        reporterTextFilter,
+        crawlerTextFilter,
+      ])
       .outputOptions([
         '-map [vout]',
         '-map 0:a?',
@@ -956,13 +1125,15 @@ app.use((err, _req, res, _next) => {
 
 ensureDefaultAdmin();
 
-app.listen(PORT, () => {
-  console.log(`NewsOverlay Pro Server running on port ${PORT}`);
-  console.log(`Storage root: ${storageRoot}`);
-  console.log(`Upload directory: ${uploadsDir}`);
-  console.log(`Output directory: ${outputsDir}`);
-  console.log(`Assigned videos directory: ${assignedVideosDir}`);
-  console.log(`Default admin username: ${adminUsername}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`NewsOverlay Pro Server running on port ${PORT}`);
+    console.log(`Storage root: ${storageRoot}`);
+    console.log(`Upload directory: ${uploadsDir}`);
+    console.log(`Output directory: ${outputsDir}`);
+    console.log(`Assigned videos directory: ${assignedVideosDir}`);
+    console.log(`Default admin username: ${adminUsername}`);
+  });
+}
 
 module.exports = app;
