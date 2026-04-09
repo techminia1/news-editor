@@ -17,8 +17,17 @@ const path = require('path');
 const fs = require('fs-extra');
 const { v4: uuidv4 } = require('uuid');
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-ffmpeg.setFfprobePath(ffprobeInstaller.path);
+let ffmpegReady = false;
+let ffmpegInitError = null;
+
+try {
+  ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  ffmpeg.setFfprobePath(ffprobeInstaller.path);
+  ffmpegReady = true;
+} catch (error) {
+  ffmpegInitError = error;
+  console.error(`FFmpeg initialization failed: ${error.message}`);
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -300,6 +309,14 @@ function resolveFFmpegTextColor(color) {
   return color === 'black' ? 'black' : 'white';
 }
 
+function ensureFfmpegReady() {
+  if (!ffmpegReady) {
+    throw new Error(
+      ffmpegInitError?.message || 'FFmpeg is not available in the current runtime environment'
+    );
+  }
+}
+
 function getCanvasModule() {
   if (canvasModule !== undefined) {
     return canvasModule;
@@ -357,6 +374,7 @@ function drawFittedText(ctx, text, x, y, maxWidth, baseFontSize) {
 }
 
 function getVideoMetadata(videoPath) {
+  ensureFfmpegReady();
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(videoPath, (err, metadata) => {
       if (err) {
@@ -632,6 +650,7 @@ async function createOverlayImage(overlayPath, settings, orientation, width, hei
 }
 
 async function processVideoWithOverlay(inputPath, outputPath, settings, orientation, videoInfo, logoPath) {
+  ensureFfmpegReady();
   const overlayPath = path.join(tempDir, `overlay_${uuidv4()}.png`);
   const layout = await createOverlayImage(
     overlayPath,
@@ -697,6 +716,7 @@ async function processVideoWithOverlay(inputPath, outputPath, settings, orientat
 }
 
 async function normalizeVideoSegment(inputPath, outputPath, targetWidth, targetHeight) {
+  ensureFfmpegReady();
   const metadata = await getVideoMetadata(inputPath);
   const videoFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p`;
 
@@ -746,6 +766,7 @@ async function normalizeVideoSegment(inputPath, outputPath, targetWidth, targetH
 }
 
 async function concatNormalizedVideos(segmentPaths, outputPath) {
+  ensureFfmpegReady();
   const listFile = path.join(tempDir, `concat_${uuidv4()}.txt`);
   const listContents = segmentPaths
     .map((segmentPath) => `file '${segmentPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`)
@@ -903,6 +924,8 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     uptime: process.uptime(),
     storageRoot,
+    ffmpegReady,
+    ffmpegInitError: ffmpegInitError?.message || null,
     directories: {
       uploads: fs.existsSync(uploadsDir),
       outputs: fs.existsSync(outputsDir),
