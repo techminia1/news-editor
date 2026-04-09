@@ -22,9 +22,12 @@ ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const defaultStorageRoot = process.env.VERCEL
+  ? path.join('/tmp', 'newsoverlay-pro')
+  : __dirname;
 const storageRoot = process.env.DATA_ROOT
   ? path.resolve(process.cwd(), process.env.DATA_ROOT)
-  : __dirname;
+  : defaultStorageRoot;
 
 const uploadsDir = path.join(storageRoot, 'uploads');
 const outputsDir = path.join(storageRoot, 'outputs');
